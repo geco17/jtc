@@ -2,14 +2,15 @@ package com.example.jtc.be;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVPrinter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.PrintStream;
+import java.io.PrintWriter;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -28,32 +29,9 @@ public class JTC {
             JsonNode tree = om.readTree(in);
             List<Row> rows = new ArrayList<>();
             flatten(tree, startLevel(tree), null, new Row(), rows);
-            Set<String> labels = new TreeSet<>();
-            for (Row r : rows) {
-                for (Cell c : r.cells) {
-                    labels.add(c.label);
-                }
-            }
-            Map<String, Col> cols = new HashMap<>();
-            for (Row r :  rows) {
-                Set<String> found = new HashSet<>();
-                for (Cell c : r.cells) {
-                    Col col = cols.getOrDefault(c.label, new Col());
-                    col.add(c);
-                    cols.put(c.label, col);
-                    found.add(c.label);
-                }
-                Set<String> notFound = new HashSet<>(labels);
-                for (String l : found) {
-                    notFound.remove(l);
-                }
-                for (String l : notFound) {
-                    Col col = cols.getOrDefault(l, new Col());
-                    col.add(null);
-                    cols.put(l, col);
-                }
-            }
-            return new Table(cols, rows.size(), labels);
+            Table table = new Table(rows);
+            table.print(System.out);
+            return table;
         } catch (IOException e) {
             throw new JTCException(e);
         }
@@ -62,51 +40,42 @@ public class JTC {
     private int startLevel(JsonNode tree) {
         if (tree.isObject()) {
             return 1;
+        } else {
+            return 0;
         }
-        if (tree.isArray()) {
-            Iterator<JsonNode> it = tree.elements();
-            while (it.hasNext()) {
-                JsonNode el = it.next();
-                if (el.isObject()) {
-                    return 0;
-                }
-            }
-        }
-        return -1;
     }
 
     private void flatten(JsonNode curNode, int level, String label, Row row, List<Row> rows) {
-        if (curNode.isObject()) {
-            ObjectNode node = (ObjectNode) curNode;
-            node.fields().forEachRemaining(f -> flatten(
-                    f.getValue(),
-                    level + 1,
-                    objColumnLabel(level, label, f.getKey()), row, rows));
+        if (!curNode.isArray()) {
+            if (curNode.isObject()) {
+                curNode.fields().forEachRemaining(f -> flatten(
+                        f.getValue(),
+                        level + 1,
+                        columnLabel(level, label, f.getKey()), row, rows));
+            } else {
+                row.add(new Cell(label, curNode.asText()));
+            }
             if (level == 1) {
                 rows.add(new Row(row));
                 row.clear();
             }
-        } else if (curNode.isArray()) {
-            ArrayNode node = (ArrayNode) curNode;
-            AtomicInteger i = new AtomicInteger(0);
-            node.elements().forEachRemaining(e -> flatten(
-                    e,
-                    level + 1,
-                    arrColumnLabel(
-                            level,
-                            label,
-                            i.getAndIncrement()), row, rows));
-            // add row for array with values
-            if (level == -1) {
-                rows.add(new Row(row));
-                row.clear();
-            }
         } else {
-            row.add(new Cell(label, curNode.asText()));
+            AtomicInteger i = new AtomicInteger(0);
+            curNode.elements().forEachRemaining(el -> {
+                int curIndex = i.getAndIncrement();
+                flatten(
+                        el,
+                        level + 1,
+                        columnLabel(
+                                level,
+                                label,
+                                level == 0 ? "" : String.valueOf(curIndex)),
+                        row, rows);
+            });
         }
     }
 
-    private String objColumnLabel(int level, String label, String key) {
+    private String columnLabel(int level, String label, String key) {
         if (label == null) {
             label = "";
         }
@@ -114,19 +83,6 @@ public class JTC {
             label += "/";
         }
         return label + key;
-    }
-
-    private String arrColumnLabel(int level, String label, int index) {
-        if (label == null) {
-            label = "";
-        }
-        if (level == -1) {
-            label += index;
-        }
-        if (level > 1) {
-            label += "/" + index;
-        }
-        return label;
     }
 
     static class JTCException extends RuntimeException {
@@ -167,6 +123,7 @@ public class JTC {
         public void add(Cell cell) {
             cells.add(cell);
         }
+
         public void clear() {
             this.cells.clear();
         }
@@ -195,17 +152,56 @@ public class JTC {
 
     static class Table {
 
-        // TODO
-        public Table(Map<String, Col> colData, int size, Set<String> labels) {
-            for (String label : labels) {
-                System.out.print(label + ";");
-            }
-            System.out.println();
-            for (int i = 0; i < size; i++) {
-                for (String label : labels) {
-                    System.out.print(colData.get(label).valueAt(i) + ";");
+        private final String[] labels;
+
+        private String[][] data;
+
+        public Table(List<Row> rows) {
+            Set<String> labels = new TreeSet<>();
+            for (Row r : rows) {
+                for (Cell c : r.cells) {
+                    labels.add(c.label);
                 }
-                System.out.println();
+            }
+            Map<String, Col> cols = new HashMap<>();
+            for (Row r : rows) {
+                Set<String> found = new HashSet<>();
+                for (Cell c : r.cells) {
+                    Col col = cols.getOrDefault(c.label, new Col());
+                    col.add(c);
+                    cols.put(c.label, col);
+                    found.add(c.label);
+                }
+                Set<String> notFound = new HashSet<>(labels);
+                for (String l : found) {
+                    notFound.remove(l);
+                }
+                for (String l : notFound) {
+                    Col col = cols.getOrDefault(l, new Col());
+                    col.add(null);
+                    cols.put(l, col);
+                }
+            }
+            this.labels = labels.toArray(String[]::new);
+            data = new String[rows.size()][labels.size()];
+            for (int i = 0; i < rows.size(); i++) {
+                int j = 0;
+                for (String label : labels) {
+                    data[i][j] = cols.get(label).valueAt(i);
+                    j++;
+                }
+            }
+        }
+
+        public void print(PrintStream out) {
+            try {
+                CSVPrinter printer = new CSVPrinter(out, CSVFormat.EXCEL);
+                printer.printRecord((Object[]) labels);
+                for (String[] datum : data) {
+                    printer.printRecord((Object[]) datum);
+                }
+            } catch (IOException e) {
+                logger.error("Could not print!", e);
             }
         }
     }
